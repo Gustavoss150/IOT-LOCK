@@ -7,6 +7,7 @@ import (
 	"iot-lock/controllers"
 	"iot-lock/entities"
 	repoImpl "iot-lock/repositories/impl"
+	"iot-lock/routes"
 	"iot-lock/services"
 
 	"github.com/gin-gonic/gin"
@@ -57,27 +58,9 @@ func main() {
 	})
 
 	api := r.Group("/api")
-
-	users := api.Group("/users")
-	users.POST("", userController.Create)
-	users.GET("", userController.List)
-	users.GET(":id", userController.GetByID)
-	users.PUT(":id", userController.Update)
-	users.DELETE(":id", userController.Delete)
-
-	cards := api.Group("/cards")
-	cards.POST("", cardController.Create)
-	cards.GET("", cardController.List)
-	cards.GET(":id", cardController.GetByID)
-	cards.GET("/uid/:uid", cardController.GetByUID)
-	cards.PATCH(":id/status", cardController.UpdateStatus)
-	cards.DELETE(":id", cardController.Delete)
-
-	accessLogs := api.Group("/access-logs")
-	accessLogs.POST("", accessLogController.Create)
-	accessLogs.GET(":id", accessLogController.GetByID)
-	accessLogs.GET("/recent", accessLogController.ListRecent)
-	accessLogs.GET("/card/:cardID", accessLogController.ListByCardID)
+	routes.SetupUserRoutes(api, userController)
+	routes.SetupCardRoutes(api, cardController)
+	routes.SetupAccessLogRoutes(api, accessLogController)
 
 	if err := r.Run(); err != nil {
 		log.Fatalf("iniciar servidor: %v", err)
