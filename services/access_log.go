@@ -3,6 +3,7 @@ package services
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"iot-lock/entities"
@@ -17,13 +18,20 @@ func NewAccessLogService(repo repoInterfaces.AccessLogRepository) *AccessLogServ
 	return &AccessLogService{repo: repo}
 }
 
-func (s *AccessLogService) Create(cardID uint, authorized bool) (*entities.AccessLog, error) {
-	if cardID == 0 {
-		return nil, errors.New("o ID do cartão é obrigatório")
+func (s *AccessLogService) Create(cardID *uint, cardUID string, authorized bool) (*entities.AccessLog, error) {
+	uid := strings.TrimSpace(cardUID)
+	if (cardID == nil || *cardID == 0) && uid == "" {
+		return nil, errors.New("o ID ou UID do cartão é obrigatório")
+	}
+
+	var normalizedCardID *uint
+	if cardID != nil && *cardID > 0 {
+		normalizedCardID = cardID
 	}
 
 	log := &entities.AccessLog{
-		CardID:     cardID,
+		CardID:     normalizedCardID,
+		CardUID:    uid,
 		Authorized: authorized,
 		AccessedAt: time.Now(),
 	}

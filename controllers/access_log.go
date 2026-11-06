@@ -19,8 +19,9 @@ func NewAccessLogController(service *services.AccessLogService) *AccessLogContro
 
 func (ctrl *AccessLogController) Create(ctx *gin.Context) {
 	var payload struct {
-		CardID     uint `json:"card_id"`
-		Authorized bool `json:"authorized"`
+		CardID     *uint  `json:"card_id"`
+		CardUID    string `json:"card_uid"`
+		Authorized bool   `json:"authorized"`
 	}
 
 	if err := ctx.ShouldBindJSON(&payload); err != nil {
@@ -28,7 +29,7 @@ func (ctrl *AccessLogController) Create(ctx *gin.Context) {
 		return
 	}
 
-	logEntry, err := ctrl.service.Create(payload.CardID, payload.Authorized)
+	logEntry, err := ctrl.service.Create(payload.CardID, payload.CardUID, payload.Authorized)
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

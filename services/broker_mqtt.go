@@ -119,10 +119,15 @@ func (m *MQTTBrokerService) onAccessRequest(client mqtt.Client, msg mqtt.Message
 		card, err := m.cardService.GetByUID(uid)
 		if err != nil {
 			log.Printf("🔒 Cartão UID %s não encontrado: %v", uid, err)
+			if m.accessLogService != nil {
+				if _, logErr := m.accessLogService.Create(nil, uid, false); logErr != nil {
+					log.Printf("⚠️ Erro ao salvar log de cartão não cadastrado: %v", logErr)
+				}
+			}
 		} else if !card.Active {
 			log.Printf("🔒 Cartão UID %s encontrado (ID=%d), porém está INATIVO", uid, card.ID)
 			if m.accessLogService != nil {
-				if _, logErr := m.accessLogService.Create(card.ID, false); logErr != nil {
+				if _, logErr := m.accessLogService.Create(&card.ID, uid, false); logErr != nil {
 					log.Printf("⚠️ Erro ao salvar log de acesso negado: %v", logErr)
 				}
 			}
@@ -131,7 +136,7 @@ func (m *MQTTBrokerService) onAccessRequest(client mqtt.Client, msg mqtt.Message
 			status = "LIBERADO"
 			log.Printf("🔓 Acesso LIBERADO para o cartão UID %s (ID=%d, UserID=%d)", uid, card.ID, card.UserID)
 			if m.accessLogService != nil {
-				if _, logErr := m.accessLogService.Create(card.ID, true); logErr != nil {
+				if _, logErr := m.accessLogService.Create(&card.ID, uid, true); logErr != nil {
 					log.Printf("⚠️ Erro ao salvar log de acesso autorizado: %v", logErr)
 				}
 			}
