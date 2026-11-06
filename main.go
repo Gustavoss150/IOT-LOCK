@@ -45,6 +45,9 @@ func main() {
 	cardService := services.NewCardService(cardRepo)
 	accessLogService := services.NewAccessLogService(accessLogRepo)
 
+	mqttBroker := services.NewMQTTBrokerService(cardService, accessLogService)
+	mqttBroker.StartMQTT()
+
 	userController := controllers.NewUserController(userService)
 	cardController := controllers.NewCardController(cardService)
 	accessLogController := controllers.NewAccessLogController(accessLogService)
