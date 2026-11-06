@@ -55,7 +55,7 @@ func main() {
 
 	userController := controllers.NewUserController(userService)
 	cardController := controllers.NewCardController(cardService, mqttBroker)
-	accessLogController := controllers.NewAccessLogController(accessLogService)
+	accessLogController := controllers.NewAccessLogController(accessLogService, mqttBroker)
 
 	r := gin.Default()
 

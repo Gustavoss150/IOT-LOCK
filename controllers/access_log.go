@@ -11,10 +11,26 @@ import (
 
 type AccessLogController struct {
 	service *services.AccessLogService
+	broker  *services.MQTTBrokerService
 }
 
-func NewAccessLogController(service *services.AccessLogService) *AccessLogController {
-	return &AccessLogController{service: service}
+func NewAccessLogController(service *services.AccessLogService, broker *services.MQTTBrokerService) *AccessLogController {
+	return &AccessLogController{service: service, broker: broker}
+}
+
+func (ctrl *AccessLogController) RemoteUnlock(ctx *gin.Context) {
+	if ctrl.broker == nil {
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "broker MQTT não disponível"})
+		return
+	}
+
+	logEntry, err := ctrl.broker.RemoteUnlock()
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, logEntry)
 }
 
 func (ctrl *AccessLogController) Create(ctx *gin.Context) {

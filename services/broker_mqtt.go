@@ -91,6 +91,16 @@ func (m *MQTTBrokerService) CancelEnrollment() {
 	m.publishToTopic(TopicEnrollmentCommand, []byte(`{"modo":"CANCELAR"}`))
 }
 
+func (m *MQTTBrokerService) RemoteUnlock() (*entities.AccessLog, error) {
+	log.Println("🔓 [ABERTURA REMOTA] Comando enviado pelo painel web!")
+	m.publishResponse("PAINEL_WEB", "LIBERADO")
+
+	if m.accessLogService != nil {
+		return m.accessLogService.Create(nil, "PAINEL_WEB", true)
+	}
+	return nil, nil
+}
+
 func (m *MQTTBrokerService) GetEnrollmentStatus() EnrollmentStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
