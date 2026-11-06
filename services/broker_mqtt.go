@@ -17,8 +17,14 @@ import (
 )
 
 const (
+	// Tópicos de Controle de Acesso da Porta
 	TopicAccessRequest  = "smartlock/acesso/solicitacao" // ESP -> Backend
 	TopicAccessResponse = "smartlock/acesso/resposta"    // Backend -> ESP
+
+	// Tópicos de Cadastro de Cartão
+	TopicEnrollmentCommand  = "smartlock/cadastro/comando"     // Backend -> ESP (Ativa/Cancela modo cadastro)
+	TopicEnrollmentRequest  = "smartlock/cadastro/solicitacao" // ESP -> Backend (Envia UID lido para cadastro)
+	TopicEnrollmentResponse = "smartlock/cadastro/resposta"    // Backend -> ESP (Confirma leitura do cadastro)
 )
 
 type AccessRequestPayload struct {
@@ -62,25 +68,27 @@ func NewMQTTBrokerService(cardService *CardService, accessLogService *AccessLogS
 
 func (m *MQTTBrokerService) StartEnrollment(userID uint) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.enrollmentActive = true
 	m.enrollmentUserID = userID
 	m.enrollmentExpiresAt = time.Now().Add(60 * time.Second)
 	m.lastEnrolledCard = nil
 	m.conflictCard = nil
 	m.lastEnrollmentErr = ""
-	log.Printf("🪪 [MODO CADASTRO] Aguardando leitura de cartão no RFID da porta para UserID=%d (60s)...", userID)
+	m.mu.Unlock()
+
+	log.Printf("🪪 [MODO CADASTRO] Aguardando leitura de cartão no tópico %s para UserID=%d (60s)...", TopicEnrollmentRequest, userID)
+	m.publishToTopic(TopicEnrollmentCommand, []byte(`{"modo":"ATIVAR"}`))
 }
 
 func (m *MQTTBrokerService) CancelEnrollment() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.enrollmentActive = false
 	m.enrollmentUserID = 0
 	m.conflictCard = nil
+	m.mu.Unlock()
+
 	log.Println("🪪 [MODO CADASTRO] Cancelado.")
+	m.publishToTopic(TopicEnrollmentCommand, []byte(`{"modo":"CANCELAR"}`))
 }
 
 func (m *MQTTBrokerService) GetEnrollmentStatus() EnrollmentStatus {
@@ -149,7 +157,13 @@ func (m *MQTTBrokerService) StartMQTT() {
 			log.Printf("❌ Erro ao subscrever ao tópico %s: %v", TopicAccessRequest, token.Error())
 			return
 		}
-		log.Printf("📡 Inscrito no tópico: %s", TopicAccessRequest)
+		log.Printf("📡 Inscrito no tópico de acesso: %s", TopicAccessRequest)
+
+		if token := c.Subscribe(TopicEnrollmentRequest, 1, m.onEnrollmentRequest); token.Wait() && token.Error() != nil {
+			log.Printf("❌ Erro ao subscrever ao tópico %s: %v", TopicEnrollmentRequest, token.Error())
+			return
+		}
+		log.Printf("📡 Inscrito no tópico de cadastro: %s", TopicEnrollmentRequest)
 	}
 
 	m.client = mqtt.NewClient(opts)
@@ -158,8 +172,88 @@ func (m *MQTTBrokerService) StartMQTT() {
 	}
 }
 
+func (m *MQTTBrokerService) onEnrollmentRequest(client mqtt.Client, msg mqtt.Message) {
+	fmt.Printf("📨 [MQTT RX - CADASTRO] Tópico: %s | Payload: %s\n", msg.Topic(), string(msg.Payload()))
+
+	var req AccessRequestPayload
+	if err := json.Unmarshal(msg.Payload(), &req); err != nil {
+		log.Printf("⚠️ Erro ao decodificar JSON de cadastro: %v", err)
+		return
+	}
+
+	uid := strings.ToUpper(strings.TrimSpace(req.UID))
+	if uid == "" {
+		log.Println("⚠️ Solicitação de cadastro recebida sem UID válido")
+		return
+	}
+
+	m.processEnrollmentUID(uid, TopicEnrollmentResponse)
+}
+
+func (m *MQTTBrokerService) processEnrollmentUID(uid string, responseTopic string) {
+	m.mu.Lock()
+	isEnrolling := m.enrollmentActive && time.Now().Before(m.enrollmentExpiresAt)
+	enrollUserID := m.enrollmentUserID
+	if isEnrolling {
+		m.enrollmentActive = false
+	}
+	m.mu.Unlock()
+
+	if !isEnrolling || m.cardService == nil {
+		log.Printf("⚠️ Leitura de cadastro ignorada (modo cadastro inativo ou expirado para UID %s)", uid)
+		m.publishResponseToTopic(responseTopic, uid, "EXPIRADO")
+		return
+	}
+
+	log.Printf("🪪 [MODO CADASTRO] Cartão UID %s recebido! Verificando vínculo para UserID=%d...", uid, enrollUserID)
+	existingCard, err := m.cardService.GetByUID(uid)
+	if err == nil && existingCard != nil {
+		if existingCard.UserID != enrollUserID {
+			m.mu.Lock()
+			m.conflictCard = existingCard
+			m.lastEnrolledCard = nil
+			m.lastEnrollmentErr = ""
+			m.mu.Unlock()
+			log.Printf("⚠️ [MODO CADASTRO] Cartão UID %s já pertence ao UserID=%d. Aguardando confirmação para transferir para UserID=%d.", uid, existingCard.UserID, enrollUserID)
+			m.publishResponseToTopic(responseTopic, uid, "CONFLITO")
+			return
+		}
+
+		existingCard.Active = true
+		card, updateErr := m.cardService.Update(existingCard)
+		m.mu.Lock()
+		if updateErr != nil {
+			m.lastEnrollmentErr = updateErr.Error()
+		} else {
+			m.lastEnrolledCard = card
+			m.lastEnrollmentErr = ""
+		}
+		m.mu.Unlock()
+		m.publishResponseToTopic(responseTopic, uid, "CADASTRADO")
+		return
+	}
+
+	card, createErr := m.cardService.Create(uid, enrollUserID)
+	m.mu.Lock()
+	if createErr != nil {
+		m.lastEnrollmentErr = createErr.Error()
+		log.Printf("❌ [MODO CADASTRO] Erro ao cadastrar cartão %s: %v", uid, createErr)
+	} else {
+		m.lastEnrolledCard = card
+		m.lastEnrollmentErr = ""
+		log.Printf("✅ [MODO CADASTRO] Cartão UID %s cadastrado com sucesso para UserID=%d!", uid, enrollUserID)
+	}
+	m.mu.Unlock()
+
+	if createErr == nil {
+		m.publishResponseToTopic(responseTopic, uid, "CADASTRADO")
+	} else {
+		m.publishResponseToTopic(responseTopic, uid, "ERRO")
+	}
+}
+
 func (m *MQTTBrokerService) onAccessRequest(client mqtt.Client, msg mqtt.Message) {
-	fmt.Printf("📨 [MQTT RX] Tópico: %s | Payload: %s\n", msg.Topic(), string(msg.Payload()))
+	fmt.Printf("📨 [MQTT RX - ACESSO] Tópico: %s | Payload: %s\n", msg.Topic(), string(msg.Payload()))
 
 	var req AccessRequestPayload
 	if err := json.Unmarshal(msg.Payload(), &req); err != nil {
@@ -173,62 +267,12 @@ func (m *MQTTBrokerService) onAccessRequest(client mqtt.Client, msg mqtt.Message
 		return
 	}
 
-	// Verifica se o sistema está em Modo de Cadastro de Cartão usando o RFID da porta
+	// Fallback: caso a ESP8266 ainda esteja com o firmware antigo enviando no tópico de acesso durante o modo cadastro
 	m.mu.Lock()
 	isEnrolling := m.enrollmentActive && time.Now().Before(m.enrollmentExpiresAt)
-	enrollUserID := m.enrollmentUserID
-	if isEnrolling {
-		m.enrollmentActive = false
-	}
 	m.mu.Unlock()
-
-	if isEnrolling && m.cardService != nil {
-		log.Printf("🪪 [MODO CADASTRO] Cartão UID %s lido na porta! Verificando vínculo para UserID=%d...", uid, enrollUserID)
-		existingCard, err := m.cardService.GetByUID(uid)
-		if err == nil && existingCard != nil {
-			if existingCard.UserID != enrollUserID {
-				// Cartão já pertence a outra pessoa: aguarda confirmação no front-end antes de transferir
-				m.mu.Lock()
-				m.conflictCard = existingCard
-				m.lastEnrolledCard = nil
-				m.lastEnrollmentErr = ""
-				m.mu.Unlock()
-				log.Printf("⚠️ [MODO CADASTRO] Cartão UID %s já pertence ao UserID=%d. Aguardando confirmação para transferir para UserID=%d.", uid, existingCard.UserID, enrollUserID)
-				m.publishResponse(uid, "CADASTRADO")
-				return
-			}
-
-			existingCard.Active = true
-			card, updateErr := m.cardService.Update(existingCard)
-			m.mu.Lock()
-			if updateErr != nil {
-				m.lastEnrollmentErr = updateErr.Error()
-			} else {
-				m.lastEnrolledCard = card
-				m.lastEnrollmentErr = ""
-			}
-			m.mu.Unlock()
-			m.publishResponse(uid, "CADASTRADO")
-			return
-		}
-
-		card, createErr := m.cardService.Create(uid, enrollUserID)
-		m.mu.Lock()
-		if createErr != nil {
-			m.lastEnrollmentErr = createErr.Error()
-			log.Printf("❌ [MODO CADASTRO] Erro ao cadastrar cartão %s: %v", uid, createErr)
-		} else {
-			m.lastEnrolledCard = card
-			m.lastEnrollmentErr = ""
-			log.Printf("✅ [MODO CADASTRO] Cartão UID %s cadastrado com sucesso para UserID=%d!", uid, enrollUserID)
-		}
-		m.mu.Unlock()
-
-		if createErr == nil {
-			m.publishResponse(uid, "CADASTRADO")
-		} else {
-			m.publishResponse(uid, "NEGADO")
-		}
+	if isEnrolling {
+		m.processEnrollmentUID(uid, TopicAccessResponse)
 		return
 	}
 
@@ -270,6 +314,10 @@ func (m *MQTTBrokerService) onAccessRequest(client mqtt.Client, msg mqtt.Message
 }
 
 func (m *MQTTBrokerService) publishResponse(uid, status string) {
+	m.publishResponseToTopic(TopicAccessResponse, uid, status)
+}
+
+func (m *MQTTBrokerService) publishResponseToTopic(topic, uid, status string) {
 	resp := AccessResponsePayload{
 		Status: status,
 		UID:    uid,
@@ -281,13 +329,22 @@ func (m *MQTTBrokerService) publishResponse(uid, status string) {
 		return
 	}
 
-	token := m.client.Publish(TopicAccessResponse, 1, false, payloadBytes)
-	token.Wait()
-	if token.Error() != nil {
-		log.Printf("❌ Erro ao publicar resposta em %s: %v", TopicAccessResponse, token.Error())
+	m.publishToTopic(topic, payloadBytes)
+}
+
+func (m *MQTTBrokerService) publishToTopic(topic string, payloadBytes []byte) {
+	if m.client == nil || !m.client.IsConnected() {
+		log.Printf("⚠️ Cliente MQTT não conectado ao tentar publicar em %s", topic)
 		return
 	}
 
-	log.Printf("📤 [MQTT TX] Resposta publicada em %s -> %s", TopicAccessResponse, string(payloadBytes))
+	token := m.client.Publish(topic, 1, false, payloadBytes)
+	token.Wait()
+	if token.Error() != nil {
+		log.Printf("❌ Erro ao publicar em %s: %v", topic, token.Error())
+		return
+	}
+
+	log.Printf("📤 [MQTT TX] Publicado em %s -> %s", topic, string(payloadBytes))
 }
 
