@@ -7,6 +7,10 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
+	"time"
+
+	"iot-lock/entities"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/joho/godotenv"
@@ -27,16 +31,68 @@ type AccessResponsePayload struct {
 	UID    string `json:"uid"`
 }
 
+type EnrollmentStatus struct {
+	Active bool           `json:"active"`
+	UserID uint           `json:"user_id"`
+	Card   *entities.Card `json:"card,omitempty"`
+	Error  string         `json:"error,omitempty"`
+}
+
 type MQTTBrokerService struct {
 	client           mqtt.Client
 	cardService      *CardService
 	accessLogService *AccessLogService
+
+	mu                  sync.Mutex
+	enrollmentActive    bool
+	enrollmentUserID    uint
+	enrollmentExpiresAt time.Time
+	lastEnrolledCard    *entities.Card
+	lastEnrollmentErr   string
 }
 
 func NewMQTTBrokerService(cardService *CardService, accessLogService *AccessLogService) *MQTTBrokerService {
 	return &MQTTBrokerService{
 		cardService:      cardService,
 		accessLogService: accessLogService,
+	}
+}
+
+func (m *MQTTBrokerService) StartEnrollment(userID uint) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.enrollmentActive = true
+	m.enrollmentUserID = userID
+	m.enrollmentExpiresAt = time.Now().Add(60 * time.Second)
+	m.lastEnrolledCard = nil
+	m.lastEnrollmentErr = ""
+	log.Printf("🪪 [MODO CADASTRO] Aguardando leitura de cartão no RFID da porta para UserID=%d (60s)...", userID)
+}
+
+func (m *MQTTBrokerService) CancelEnrollment() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.enrollmentActive = false
+	m.enrollmentUserID = 0
+	log.Println("🪪 [MODO CADASTRO] Cancelado.")
+}
+
+func (m *MQTTBrokerService) GetEnrollmentStatus() EnrollmentStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.enrollmentActive && time.Now().After(m.enrollmentExpiresAt) {
+		m.enrollmentActive = false
+		m.lastEnrollmentErr = "Tempo limite para aproximar o cartão expirou."
+	}
+
+	return EnrollmentStatus{
+		Active: m.enrollmentActive,
+		UserID: m.enrollmentUserID,
+		Card:   m.lastEnrolledCard,
+		Error:  m.lastEnrollmentErr,
 	}
 }
 
@@ -109,6 +165,46 @@ func (m *MQTTBrokerService) onAccessRequest(client mqtt.Client, msg mqtt.Message
 	uid := strings.ToUpper(strings.TrimSpace(req.UID))
 	if uid == "" {
 		log.Println("⚠️ Solicitação recebida sem UID válido")
+		return
+	}
+
+	// Verifica se o sistema está em Modo de Cadastro de Cartão usando o RFID da porta
+	m.mu.Lock()
+	isEnrolling := m.enrollmentActive && time.Now().Before(m.enrollmentExpiresAt)
+	enrollUserID := m.enrollmentUserID
+	if isEnrolling {
+		m.enrollmentActive = false
+	}
+	m.mu.Unlock()
+
+	if isEnrolling && m.cardService != nil {
+		log.Printf("🪪 [MODO CADASTRO] Cartão UID %s lido na porta! Vinculando ao UserID=%d...", uid, enrollUserID)
+		var card *entities.Card
+		existingCard, err := m.cardService.GetByUID(uid)
+		if err == nil && existingCard != nil {
+			existingCard.UserID = enrollUserID
+			existingCard.Active = true
+			card, err = m.cardService.Update(existingCard)
+		} else {
+			card, err = m.cardService.Create(uid, enrollUserID)
+		}
+
+		m.mu.Lock()
+		if err != nil {
+			m.lastEnrollmentErr = err.Error()
+			log.Printf("❌ [MODO CADASTRO] Erro ao cadastrar cartão %s: %v", uid, err)
+		} else {
+			m.lastEnrolledCard = card
+			m.lastEnrollmentErr = ""
+			log.Printf("✅ [MODO CADASTRO] Cartão UID %s cadastrado com sucesso para UserID=%d!", uid, enrollUserID)
+		}
+		m.mu.Unlock()
+
+		if err == nil {
+			m.publishResponse(uid, "CADASTRADO")
+		} else {
+			m.publishResponse(uid, "NEGADO")
+		}
 		return
 	}
 

@@ -11,10 +11,45 @@ import (
 
 type CardController struct {
 	service *services.CardService
+	broker  *services.MQTTBrokerService
 }
 
-func NewCardController(service *services.CardService) *CardController {
-	return &CardController{service: service}
+func NewCardController(service *services.CardService, broker *services.MQTTBrokerService) *CardController {
+	return &CardController{service: service, broker: broker}
+}
+
+func (ctrl *CardController) StartEnrollment(ctx *gin.Context) {
+	if ctrl.broker == nil {
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "broker MQTT não disponível"})
+		return
+	}
+
+	var payload struct {
+		UserID uint `json:"user_id"`
+	}
+	if err := ctx.ShouldBindJSON(&payload); err != nil || payload.UserID == 0 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "selecione um usuário válido"})
+		return
+	}
+
+	ctrl.broker.StartEnrollment(payload.UserID)
+	ctx.JSON(http.StatusOK, ctrl.broker.GetEnrollmentStatus())
+}
+
+func (ctrl *CardController) GetEnrollmentStatus(ctx *gin.Context) {
+	if ctrl.broker == nil {
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "broker MQTT não disponível"})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, ctrl.broker.GetEnrollmentStatus())
+}
+
+func (ctrl *CardController) CancelEnrollment(ctx *gin.Context) {
+	if ctrl.broker != nil {
+		ctrl.broker.CancelEnrollment()
+	}
+	ctx.JSON(http.StatusOK, gin.H{"message": "modo de cadastro cancelado"})
 }
 
 func (ctrl *CardController) Create(ctx *gin.Context) {

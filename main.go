@@ -54,7 +54,7 @@ func main() {
 	mqttBroker.StartMQTT()
 
 	userController := controllers.NewUserController(userService)
-	cardController := controllers.NewCardController(cardService)
+	cardController := controllers.NewCardController(cardService, mqttBroker)
 	accessLogController := controllers.NewAccessLogController(accessLogService)
 
 	r := gin.Default()
