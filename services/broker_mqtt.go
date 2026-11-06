@@ -47,8 +47,10 @@ type EnrollmentStatus struct {
 
 type MQTTBrokerService struct {
 	client           mqtt.Client
+	userService      *UserService
 	cardService      *CardService
 	accessLogService *AccessLogService
+	telegramService  *TelegramService
 
 	mu                  sync.Mutex
 	enrollmentActive    bool
@@ -59,11 +61,29 @@ type MQTTBrokerService struct {
 	lastEnrollmentErr   string
 }
 
-func NewMQTTBrokerService(cardService *CardService, accessLogService *AccessLogService) *MQTTBrokerService {
+func NewMQTTBrokerService(
+	userService *UserService,
+	cardService *CardService,
+	accessLogService *AccessLogService,
+	telegramService *TelegramService,
+) *MQTTBrokerService {
 	return &MQTTBrokerService{
+		userService:      userService,
 		cardService:      cardService,
 		accessLogService: accessLogService,
+		telegramService:  telegramService,
 	}
+}
+
+func (m *MQTTBrokerService) resolveUserName(userID uint) string {
+	if m.userService == nil || userID == 0 {
+		return "Pessoa não identificada"
+	}
+	user, err := m.userService.GetByID(userID)
+	if err != nil || user == nil || strings.TrimSpace(user.Name) == "" {
+		return fmt.Sprintf("Pessoa #%d", userID)
+	}
+	return user.Name
 }
 
 func (m *MQTTBrokerService) StartEnrollment(userID uint) {
@@ -94,6 +114,12 @@ func (m *MQTTBrokerService) CancelEnrollment() {
 func (m *MQTTBrokerService) RemoteUnlock() (*entities.AccessLog, error) {
 	log.Println("🔓 [ABERTURA REMOTA] Comando enviado pelo painel web!")
 	m.publishResponse("PAINEL_WEB", "LIBERADO")
+
+	nowStr := time.Now().Format("02/01/2006 15:04:05")
+	m.telegramService.SendAlertAsync(fmt.Sprintf(
+		"🌐 <b>IoT SmartLock — Abertura Remota</b>\n🔓 A porta foi destrancada remotamente pelo Dashboard Web.\n🕒 <b>Horário:</b> %s",
+		nowStr,
+	))
 
 	if m.accessLogService != nil {
 		return m.accessLogService.Create(nil, "PAINEL_WEB", true)
@@ -288,6 +314,7 @@ func (m *MQTTBrokerService) onAccessRequest(client mqtt.Client, msg mqtt.Message
 
 	authorized := false
 	status := "NEGADO"
+	nowStr := time.Now().Format("02/01/2006 15:04:05")
 
 	if m.cardService != nil {
 		card, err := m.cardService.GetByUID(uid)
@@ -298,22 +325,36 @@ func (m *MQTTBrokerService) onAccessRequest(client mqtt.Client, msg mqtt.Message
 					log.Printf("⚠️ Erro ao salvar log de cartão não cadastrado: %v", logErr)
 				}
 			}
+			m.telegramService.SendAlertAsync(fmt.Sprintf(
+				"🚨 <b>IoT SmartLock — Acesso Negado!</b>\n⚠️ Tentativa com cartão <b>não cadastrado</b>.\n🪪 <b>UID:</b> <code>%s</code>\n🕒 <b>Horário:</b> %s",
+				uid, nowStr,
+			))
 		} else if !card.Active {
+			userName := m.resolveUserName(card.UserID)
 			log.Printf("🔒 Cartão UID %s encontrado (ID=%d), porém está INATIVO", uid, card.ID)
 			if m.accessLogService != nil {
 				if _, logErr := m.accessLogService.Create(&card.ID, uid, false); logErr != nil {
 					log.Printf("⚠️ Erro ao salvar log de acesso negado: %v", logErr)
 				}
 			}
+			m.telegramService.SendAlertAsync(fmt.Sprintf(
+				"🚨 <b>IoT SmartLock — Acesso Negado (Cartão Inativo)</b>\n👤 <b>Pessoa:</b> %s\n🪪 <b>Cartão:</b> <code>%s</code>\n🕒 <b>Horário:</b> %s",
+				userName, uid, nowStr,
+			))
 		} else {
 			authorized = true
 			status = "LIBERADO"
+			userName := m.resolveUserName(card.UserID)
 			log.Printf("🔓 Acesso LIBERADO para o cartão UID %s (ID=%d, UserID=%d)", uid, card.ID, card.UserID)
 			if m.accessLogService != nil {
 				if _, logErr := m.accessLogService.Create(&card.ID, uid, true); logErr != nil {
 					log.Printf("⚠️ Erro ao salvar log de acesso autorizado: %v", logErr)
 				}
 			}
+			m.telegramService.SendAlertAsync(fmt.Sprintf(
+				"🔓 <b>IoT SmartLock — Acesso Autorizado</b>\n👤 <b>Pessoa:</b> %s\n🪪 <b>Cartão:</b> <code>%s</code>\n🕒 <b>Horário:</b> %s",
+				userName, uid, nowStr,
+			))
 		}
 	} else {
 		log.Println("⚠️ CardService não configurado no broker MQTT")

@@ -49,8 +49,9 @@ func main() {
 	userService := services.NewUserService(userRepo)
 	cardService := services.NewCardService(cardRepo)
 	accessLogService := services.NewAccessLogService(accessLogRepo)
+	telegramService := services.NewTelegramService()
 
-	mqttBroker := services.NewMQTTBrokerService(cardService, accessLogService)
+	mqttBroker := services.NewMQTTBrokerService(userService, cardService, accessLogService, telegramService)
 	mqttBroker.StartMQTT()
 
 	userController := controllers.NewUserController(userService)
