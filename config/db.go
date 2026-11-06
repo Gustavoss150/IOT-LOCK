@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -26,6 +27,10 @@ var supabasePoolerRegions = []string{
 func resolveCandidateDatabaseURLs() ([]string, error) {
 	if databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL")); databaseURL != "" {
 		return []string{databaseURL}, nil
+	}
+
+	if explicitURL, err := supabaseDatabaseURL(); err == nil && explicitURL != "" {
+		return []string{explicitURL}, nil
 	}
 
 	supabaseURL := strings.TrimSpace(os.Getenv("SUPABASE_URL"))
@@ -64,13 +69,46 @@ func resolveCandidateDatabaseURLs() ([]string, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("defina DATABASE_URL ou (SUPABASE_URL e DATABASE_PASSWORD) no arquivo .env")
+	return nil, fmt.Errorf("defina DATABASE_URL, SUPABASE_DB_* ou (SUPABASE_URL e DATABASE_PASSWORD) no arquivo .env")
+}
+
+func supabaseDatabaseURL() (string, error) {
+	host := os.Getenv("SUPABASE_DB_HOST")
+	port := os.Getenv("SUPABASE_DB_PORT")
+	databaseName := os.Getenv("SUPABASE_DB_NAME")
+	databaseUser := os.Getenv("SUPABASE_DB_USER")
+	databasePassword := os.Getenv("DATABASE_PASSWORD")
+
+	if host == "" || port == "" || databaseName == "" ||
+		databaseUser == "" || databasePassword == "" {
+		return "", fmt.Errorf(
+			"defina SUPABASE_DB_HOST, SUPABASE_DB_PORT, SUPABASE_DB_NAME, SUPABASE_DB_USER e DATABASE_PASSWORD",
+		)
+	}
+
+	connectionURL := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(databaseUser, databasePassword),
+		Host:   net.JoinHostPort(host, port),
+		Path:   "/" + databaseName,
+		RawQuery: url.Values{
+			"sslmode": {"require"},
+		}.Encode(),
+	}
+
+	return connectionURL.String(), nil
 }
 
 func openAndPing(dsn string) (*gorm.DB, error) {
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
+	db, err := gorm.Open(
+		postgres.New(postgres.Config{
+			DSN:                  dsn,
+			PreferSimpleProtocol: true,
+		}),
+		&gorm.Config{
+			Logger: logger.Default.LogMode(logger.Silent),
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +124,7 @@ func openAndPing(dsn string) (*gorm.DB, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
+
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
