@@ -62,6 +62,9 @@ func (r *cardRepository) FindAll() ([]*entities.Card, error) {
 }
 
 func (r *cardRepository) DeleteByID(id uint) error {
+	// Desvincula logs de acesso existentes para preservar o histórico sem erro de chave estrangeira
+	_ = r.db.Model(&entities.AccessLog{}).Where("card_id = ?", id).Update("card_id", nil).Error
+
 	result := r.db.Delete(&entities.Card{}, id)
 	if result.Error != nil {
 		return fmt.Errorf("excluir cartão %d: %w", id, result.Error)
