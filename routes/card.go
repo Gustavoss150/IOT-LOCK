@@ -15,6 +15,7 @@ func SetupCardRoutes(router *gin.RouterGroup, controller *controllers.CardContro
 	cards.POST("/enrollment/cancel", controller.CancelEnrollment)
 	cards.GET(":id", controller.GetByID)
 	cards.GET("/uid/:uid", controller.GetByUID)
+	cards.PUT(":id", controller.UpdateUser)
 	cards.PATCH(":id/status", controller.UpdateStatus)
 	cards.DELETE(":id", controller.Delete)
 }

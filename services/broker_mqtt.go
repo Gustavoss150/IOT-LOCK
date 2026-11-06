@@ -32,10 +32,11 @@ type AccessResponsePayload struct {
 }
 
 type EnrollmentStatus struct {
-	Active bool           `json:"active"`
-	UserID uint           `json:"user_id"`
-	Card   *entities.Card `json:"card,omitempty"`
-	Error  string         `json:"error,omitempty"`
+	Active       bool           `json:"active"`
+	UserID       uint           `json:"user_id"`
+	Card         *entities.Card `json:"card,omitempty"`
+	ConflictCard *entities.Card `json:"conflict_card,omitempty"`
+	Error        string         `json:"error,omitempty"`
 }
 
 type MQTTBrokerService struct {
@@ -48,6 +49,7 @@ type MQTTBrokerService struct {
 	enrollmentUserID    uint
 	enrollmentExpiresAt time.Time
 	lastEnrolledCard    *entities.Card
+	conflictCard        *entities.Card
 	lastEnrollmentErr   string
 }
 
@@ -66,6 +68,7 @@ func (m *MQTTBrokerService) StartEnrollment(userID uint) {
 	m.enrollmentUserID = userID
 	m.enrollmentExpiresAt = time.Now().Add(60 * time.Second)
 	m.lastEnrolledCard = nil
+	m.conflictCard = nil
 	m.lastEnrollmentErr = ""
 	log.Printf("🪪 [MODO CADASTRO] Aguardando leitura de cartão no RFID da porta para UserID=%d (60s)...", userID)
 }
@@ -76,6 +79,7 @@ func (m *MQTTBrokerService) CancelEnrollment() {
 
 	m.enrollmentActive = false
 	m.enrollmentUserID = 0
+	m.conflictCard = nil
 	log.Println("🪪 [MODO CADASTRO] Cancelado.")
 }
 
@@ -89,10 +93,11 @@ func (m *MQTTBrokerService) GetEnrollmentStatus() EnrollmentStatus {
 	}
 
 	return EnrollmentStatus{
-		Active: m.enrollmentActive,
-		UserID: m.enrollmentUserID,
-		Card:   m.lastEnrolledCard,
-		Error:  m.lastEnrollmentErr,
+		Active:       m.enrollmentActive,
+		UserID:       m.enrollmentUserID,
+		Card:         m.lastEnrolledCard,
+		ConflictCard: m.conflictCard,
+		Error:        m.lastEnrollmentErr,
 	}
 }
 
@@ -178,21 +183,40 @@ func (m *MQTTBrokerService) onAccessRequest(client mqtt.Client, msg mqtt.Message
 	m.mu.Unlock()
 
 	if isEnrolling && m.cardService != nil {
-		log.Printf("🪪 [MODO CADASTRO] Cartão UID %s lido na porta! Vinculando ao UserID=%d...", uid, enrollUserID)
-		var card *entities.Card
+		log.Printf("🪪 [MODO CADASTRO] Cartão UID %s lido na porta! Verificando vínculo para UserID=%d...", uid, enrollUserID)
 		existingCard, err := m.cardService.GetByUID(uid)
 		if err == nil && existingCard != nil {
-			existingCard.UserID = enrollUserID
+			if existingCard.UserID != enrollUserID {
+				// Cartão já pertence a outra pessoa: aguarda confirmação no front-end antes de transferir
+				m.mu.Lock()
+				m.conflictCard = existingCard
+				m.lastEnrolledCard = nil
+				m.lastEnrollmentErr = ""
+				m.mu.Unlock()
+				log.Printf("⚠️ [MODO CADASTRO] Cartão UID %s já pertence ao UserID=%d. Aguardando confirmação para transferir para UserID=%d.", uid, existingCard.UserID, enrollUserID)
+				m.publishResponse(uid, "CADASTRADO")
+				return
+			}
+
 			existingCard.Active = true
-			card, err = m.cardService.Update(existingCard)
-		} else {
-			card, err = m.cardService.Create(uid, enrollUserID)
+			card, updateErr := m.cardService.Update(existingCard)
+			m.mu.Lock()
+			if updateErr != nil {
+				m.lastEnrollmentErr = updateErr.Error()
+			} else {
+				m.lastEnrolledCard = card
+				m.lastEnrollmentErr = ""
+			}
+			m.mu.Unlock()
+			m.publishResponse(uid, "CADASTRADO")
+			return
 		}
 
+		card, createErr := m.cardService.Create(uid, enrollUserID)
 		m.mu.Lock()
-		if err != nil {
-			m.lastEnrollmentErr = err.Error()
-			log.Printf("❌ [MODO CADASTRO] Erro ao cadastrar cartão %s: %v", uid, err)
+		if createErr != nil {
+			m.lastEnrollmentErr = createErr.Error()
+			log.Printf("❌ [MODO CADASTRO] Erro ao cadastrar cartão %s: %v", uid, createErr)
 		} else {
 			m.lastEnrolledCard = card
 			m.lastEnrollmentErr = ""
@@ -200,7 +224,7 @@ func (m *MQTTBrokerService) onAccessRequest(client mqtt.Client, msg mqtt.Message
 		}
 		m.mu.Unlock()
 
-		if err == nil {
+		if createErr == nil {
 			m.publishResponse(uid, "CADASTRADO")
 		} else {
 			m.publishResponse(uid, "NEGADO")

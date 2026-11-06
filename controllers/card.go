@@ -133,6 +133,39 @@ func (ctrl *CardController) UpdateStatus(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, card)
 }
 
+func (ctrl *CardController) UpdateUser(ctx *gin.Context) {
+	id, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "ID do cartão inválido"})
+		return
+	}
+
+	var payload struct {
+		UserID uint `json:"user_id"`
+	}
+	if err := ctx.ShouldBindJSON(&payload); err != nil || payload.UserID == 0 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "ID do usuário inválido"})
+		return
+	}
+
+	card, err := ctrl.service.GetByID(uint(id))
+	if err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	card.UserID = payload.UserID
+	card.Active = true
+
+	updated, err := ctrl.service.Update(card)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, updated)
+}
+
 func (ctrl *CardController) Delete(ctx *gin.Context) {
 	id, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
 	if err != nil {
