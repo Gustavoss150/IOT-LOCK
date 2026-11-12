@@ -52,7 +52,7 @@ func (s *AccessLogService) GetByID(id uint) (*entities.AccessLog, error) {
 
 func (s *AccessLogService) ListRecent(limit, offset int) ([]*entities.AccessLog, error) {
 	if limit <= 0 {
-		limit = 20
+		limit = 1000
 	}
 	if offset < 0 {
 		return nil, errors.New("o deslocamento não pode ser negativo")

@@ -99,7 +99,7 @@ func (ctrl *AccessLogController) ListByCardID(ctx *gin.Context) {
 }
 
 func parsePaginationParams(ctx *gin.Context) (int, int) {
-	limit := 20
+	limit := 1000
 	offset := 0
 
 	if value := ctx.Query("limit"); value != "" {
