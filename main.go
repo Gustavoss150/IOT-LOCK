@@ -2,10 +2,11 @@ package main
 
 import (
 	"log"
+	"os"
 
 	"iot-lock/config"
 	"iot-lock/controllers"
-	"iot-lock/entities"
+	"iot-lock/migrations"
 	repoImpl "iot-lock/repositories/impl"
 	"iot-lock/routes"
 	"iot-lock/services"
@@ -22,14 +23,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	if err := db.AutoMigrate(&entities.User{}, &entities.Card{}, &entities.AccessLog{}); err != nil {
-		log.Fatalf("migrar banco de dados: %v", err)
+	if err := migrations.Run(db); err != nil {
+		log.Fatalf("validar e migrar banco de dados: %v", err)
 	}
-	// Garante que card_id aceite NULL caso a tabela já tenha sido criada anteriormente com NOT NULL
-	_ = db.Exec("ALTER TABLE access_logs ALTER COLUMN card_id DROP NOT NULL").Error
-	// Sincroniza sequences de ID caso registros tenham sido inseridos manualmente
-	_ = db.Exec("SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1), (SELECT COUNT(*) > 0 FROM users))").Error
-	_ = db.Exec("SELECT setval(pg_get_serial_sequence('cards', 'id'), COALESCE((SELECT MAX(id) FROM cards), 1), (SELECT COUNT(*) > 0 FROM cards))").Error
 
 	userRepo, err := repoImpl.InitUserRepository(db)
 	if err != nil {
@@ -83,7 +79,11 @@ func main() {
 	routes.SetupCardRoutes(api, cardController)
 	routes.SetupAccessLogRoutes(api, accessLogController)
 
-	if err := r.Run(); err != nil {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("iniciar servidor: %v", err)
 	}
 }
